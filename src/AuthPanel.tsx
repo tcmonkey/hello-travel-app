@@ -7,6 +7,7 @@ export function AuthPanel({
 }: {
   onLogin: (session: Session) => void;
 }) {
+  // 1. 固定[mode, setMode]对应的本次操作状态，避免异步处理跨越页面生命周期。
   const [mode, setMode] = useState("登录");
   const [otpLogin, setOtpLogin] = useState(false);
   const [challenge, setChallenge] = useState("");
@@ -20,15 +21,21 @@ export function AuthPanel({
         ? "RESET_PASSWORD"
         : "LOGIN";
   const needsCode = mode !== "登录" || otpLogin;
+  // 2. 校验邮箱字段后才申请证明，避免无效投递请求。
   async function issue() {
     try {
+      // 1. 校验邮箱字段后才申请证明，避免无效投递请求。
       await form.validateFields(["email"]);
+      // 2. 更新提交状态，避免按钮重复触发当前操作。
       setBusy(true);
+      // 3. 固定result对应的本次操作状态，避免异步处理跨越页面生命周期。
       const result = await api<{ challengeId: string }>("/auth/challenge", {
         email: form.getFieldValue("email"),
         purpose,
       });
+      // 4. 更新当前用途的邮箱证明标识，旧用途证明不能复用。
       setChallenge(result.challengeId);
+      // 5. 显示服务端已接受操作的反馈，后台任务结果由后续查询确认。
       message.success("验证码已进入邮件投递流程，请查看邮箱");
     } catch (error) {
       message.error(error instanceof Error ? error.message : "发送失败");
@@ -36,17 +43,22 @@ export function AuthPanel({
       setBusy(false);
     }
   }
+  // 3. 定义认证提交流程，区分登录、注册与密码重置后的页面状态。
   async function submit(value: {
     email: string;
     password?: string;
     code?: string;
   }) {
+    // 1. 处理当前前置条件或恢复分支，失效状态不继续执行。
     if (needsCode && !challenge) {
       message.warning("请先获取邮箱验证码");
       return;
     }
+    // 2. 更新提交状态，避免按钮重复触发当前操作。
     setBusy(true);
+    // 3. 在失败反馈与资源清理边界内完成当前操作。
     try {
+      // 1. 固定path对应的本次操作状态，避免异步处理跨越页面生命周期。
       const path =
         mode === "注册" ? "register" : mode === "重置密码" ? "reset" : "login";
       const result = await api<Session>("/auth/" + path, {
@@ -55,6 +67,7 @@ export function AuthPanel({
         challengeId: challenge,
         purpose,
       });
+      // 2. 处理当前前置条件或恢复分支，失效状态不继续执行。
       if (mode === "登录") {
         adoptSession(result);
         onLogin(result);
@@ -72,6 +85,7 @@ export function AuthPanel({
       setBusy(false);
     }
   }
+  // 4. 渲染当前认证状态与表单，提交行为由认证流程负责。
   return (
     <main className="auth-shell">
       <section className="auth-story">
@@ -94,7 +108,9 @@ export function AuthPanel({
           options={["登录", "注册", "重置密码"]}
           value={mode}
           onChange={(value) => {
+            // 1. 切换认证操作模式，后续请求使用对应接口。
             setMode(String(value));
+            // 2. 更新当前用途的邮箱证明标识，旧用途证明不能复用。
             setChallenge("");
           }}
         />
@@ -118,7 +134,9 @@ export function AuthPanel({
               options={["密码登录", "验证码登录"]}
               value={otpLogin ? "验证码登录" : "密码登录"}
               onChange={(value) => {
+                // 1. 切换验证码登录方式，与密码登录使用不同证明。
                 setOtpLogin(value === "验证码登录");
+                // 2. 更新当前用途的邮箱证明标识，旧用途证明不能复用。
                 setChallenge("");
               }}
             />

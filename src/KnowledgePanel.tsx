@@ -16,14 +16,17 @@ import { UploadOutlined } from "@ant-design/icons";
 import { api } from "./api";
 import type { Document, KnowledgePage } from "./types";
 export function KnowledgePanel({ revision }: { revision: number }) {
+  // 1. 固定[documents, setDocuments]对应的本次操作状态，避免异步处理跨越页面生命周期。
   const [documents, setDocuments] = useState<Document[]>([]);
   const [selected, setSelected] = useState<Document | null>(null);
   const [source, setSource] = useState("");
   const [busy, setBusy] = useState(false);
   const { message } = App.useApp();
   const reload = useCallback(async () => {
+    // 1. 固定cursor对应的本次操作状态，避免异步处理跨越页面生命周期。
     let cursor = "0";
     const items: Document[] = [];
+    // 2. 逐页或逐项推进恢复，核对游标、停止与取消条件。
     do {
       const page = await api<KnowledgePage>("/knowledge/list", {
         after: cursor,
@@ -34,22 +37,28 @@ export function KnowledgePanel({ revision }: { revision: number }) {
       if (page.nextCursor === cursor) throw new Error("资料分页未推进");
       cursor = page.nextCursor;
     } while (true);
+    // 3. 发布完整文档列表，状态来自服务端持久化快照。
     setDocuments(items);
   }, []);
+  // 2. 绑定页面连接与数据恢复的生命周期，卸载时执行清理。
   useEffect(() => {
     reload().catch((error) => message.error(error.message));
   }, [revision, reload, message]);
+  // 3. 定义知识状态变更流程，显式提交文档版本并刷新服务端结果。
   async function mutate(document: Document, action: string) {
     try {
+      // 1. 发布当前状态或连接结果，后续页面操作使用最新快照。
       await api("/knowledge/" + action, {
         documentId: document.id,
         expectedVersion: document.version,
       });
+      // 2. 重新读取服务端文档状态，不以本地修改猜测索引结果。
       await reload();
     } catch (error) {
       message.error(error instanceof Error ? error.message : "操作失败");
     }
   }
+  // 4. 渲染文档列表、上传入口与明文预览，索引状态以服务端结果为准。
   return (
     <section className="knowledge-page">
       <div className="eyebrow">KNOWLEDGE / 私有旅行资料</div>
@@ -74,23 +83,33 @@ export function KnowledgePanel({ revision }: { revision: number }) {
         showUploadList={false}
         disabled={busy}
         beforeUpload={async (file) => {
+          // 1. 处理当前前置条件或恢复分支，失效状态不继续执行。
           if (file.size > 10 * 1024 * 1024) {
             message.error("文件不能超过10MB");
             return Upload.LIST_IGNORE;
           }
+          // 2. 更新提交状态，避免按钮重复触发当前操作。
           setBusy(true);
+          // 3. 固定data对应的本次操作状态，避免异步处理跨越页面生命周期。
           const data = new FormData();
+          // 4. 发布当前状态或连接结果，后续页面操作使用最新快照。
           data.append("file", file);
+          // 5. 处理当前前置条件或恢复分支，失效状态不继续执行。
           if (source.trim()) data.append("sourceUrl", source.trim());
+          // 6. 在失败反馈与资源清理边界内完成当前操作。
           try {
+            // 1. 发布当前状态或连接结果，后续页面操作使用最新快照。
             await api("/knowledge/upload", data);
+            // 2. 显示服务端已接受操作的反馈，后台任务结果由后续查询确认。
             message.success("资料已接收，正在建立索引");
+            // 3. 重新读取服务端文档状态，不以本地修改猜测索引结果。
             await reload();
           } catch (error) {
             message.error(error instanceof Error ? error.message : "上传失败");
           } finally {
             setBusy(false);
           }
+          // 7. 交付本段结果或清理函数，由调用方承接后续生命周期。
           return Upload.LIST_IGNORE;
         }}
       >
@@ -110,9 +129,11 @@ export function KnowledgePanel({ revision }: { revision: number }) {
                 type="link"
                 onClick={async () => {
                   try {
+                    // 1. 拉取当前接口数据窗口，分页游标必须可推进。
                     const page = await api<KnowledgePage>("/knowledge/read", {
                       documentId: document.id,
                     });
+                    // 2. 更新当前选择项，操作对象与页面选择保持一致。
                     setSelected(page.items[0]);
                   } catch (error) {
                     message.error((error as Error).message);

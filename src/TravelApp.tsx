@@ -1,3 +1,4 @@
+import { ContextBudget } from "./contextBudget";
 import {
   lazy,
   Suspense,
@@ -30,6 +31,7 @@ import {
 } from "@ant-design/icons";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api, ApiError, clearSession, recoverSession, stream } from "./api";
+import { MessageHistory } from "./messageHistory";
 const AuthPanel = lazy(() =>
   import("./AuthPanel").then((module) => ({ default: module.AuthPanel })),
 );
@@ -39,7 +41,6 @@ const KnowledgePanel = lazy(() =>
   })),
 );
 import type {
-  Budget,
   ChatPage,
   Conversation,
   Message,
@@ -48,23 +49,9 @@ import type {
   SyncEvent,
   SyncPage,
 } from "./types";
-const zeroBudget: Budget = {
-  window: 32768,
-  inputEstimate: 0,
-  outputReserve: 4096,
-  safetyReserve: 4096,
-  estimator: "utf8-upper-v1",
-  compression: "IDLE",
-};
-function parseBudget(text?: string): Budget {
-  try {
-    return text ? { ...zeroBudget, ...JSON.parse(text) } : zeroBudget;
-  } catch {
-    return zeroBudget;
-  }
-}
 const big = (value: string) => BigInt(value || "0");
 export function TravelApp() {
+  // 1. 固定{ message, modal }对应的本次操作状态，避免异步处理跨越页面生命周期。
   const { message, modal } = App.useApp();
   const [user, setUser] = useState<Session | null>(null);
   const [starting, setStarting] = useState(true);
@@ -80,7 +67,7 @@ export function TravelApp() {
   const [sending, setSending] = useState(false);
   const [connection, setConnection] = useState("正在连接");
   const [knowledgeRevision, setKnowledgeRevision] = useState(0);
-  const [budget, setBudget] = useState<Budget>(zeroBudget);
+  const [budget, setBudget] = useState<ContextBudget>(ContextBudget.empty());
   const [run, setRun] = useState<Run | undefined>();
   const [selected, setSelected] = useState<string[]>([]);
   const [editing, setEditing] = useState<Conversation | null>(null);
@@ -95,21 +82,33 @@ export function TravelApp() {
     text: string;
     requestKey: string;
   } | null>(null);
+  // 2. 定义对话切换行为，当前选择与发送目标使用同一标识。
   function select(id: string) {
+    // 1. 发布当前状态或连接结果，后续页面操作使用最新快照。
     activeRef.current = id;
+    // 2. 发布当前对话标识，后续恢复与发送绑定该对话。
     setActive(id);
+    // 3. 更新当前选择项，操作对象与页面选择保持一致。
     setSelected([]);
+    // 4. 切换侧栏功能，加载对应的聊天或知识界面。
     setMenu("chat");
   }
+  // 3. 定义对话列表发布行为，统一处理去重与页面状态。
   function publishTabs(values: Conversation[]) {
+    // 1. 发布当前状态或连接结果，后续页面操作使用最新快照。
     values = [...new Map(values.map((value) => [value.id, value])).values()];
+    // 2. 发布当前状态或连接结果，后续页面操作使用最新快照。
     tabsRef.current = values;
+    // 3. 发布服务端对话列表，界面与持久化结果保持同步。
     setTabs(values);
+    // 4. 处理当前前置条件或恢复分支，失效状态不继续执行。
     if (!values.some((tab) => tab.id === activeRef.current))
       select(values[0]?.id || "");
   }
+  // 4. 固定loadHistory对应的本次操作状态，避免异步处理跨越页面生命周期。
   const loadHistory = useCallback(
     async (id: string, full: boolean, generation: number) => {
+      // 1. 逐页或逐项推进恢复，核对游标、停止与取消条件。
       for (let retry = 0; retry < 3; retry++) {
         const cached = historiesRef.current[id] || [];
         const prior = tabsRef.current.find((tab) => tab.id === id);
@@ -126,6 +125,7 @@ export function TravelApp() {
         const rows: Message[] = [];
         let conversation: Conversation | undefined;
         try {
+          // 1. 逐页或逐项推进恢复，核对游标、停止与取消条件。
           do {
             const page = await api<ChatPage>("/chat/history", {
               conversationId: id,
@@ -142,20 +142,16 @@ export function TravelApp() {
             if (page.nextCursor === after) throw new Error("消息分页未推进");
             after = page.nextCursor;
           } while (true);
+          // 2. 核对登录恢复代次，丢弃旧页面或重复事件。
           if (epoch.current !== generation) return;
-          const merged = new Map(
-            (full ? [] : cached).map((item) => [item.id, item]),
-          );
-          for (const row of rows) {
-            const old = merged.get(row.id);
-            if (!old || big(row.version) >= big(old.version))
-              merged.set(row.id, row);
-          }
-          const values = Array.from(merged.values()).sort((a, b) =>
-            big(a.seq) < big(b.seq) ? -1 : 1,
-          );
+          // 历史对象统一处理全量替换、迟到版本和稳定排序。
+          // 3. 取得按稳定序号合并的消息快照供界面发布。
+          const values = MessageHistory.merge(cached, rows, full).snapshot();
+          // 4. 发布当前状态或连接结果，后续页面操作使用最新快照。
           historiesRef.current = { ...historiesRef.current, [id]: values };
+          // 5. 发布当前按对话隔离的消息历史，版本合并由历史对象完成。
           setHistories(historiesRef.current);
+          // 6. 处理当前前置条件或恢复分支，失效状态不继续执行。
           if (conversation) {
             const next = tabsRef.current.map((tab) =>
               tab.id === id ? conversation! : tab,
@@ -163,6 +159,7 @@ export function TravelApp() {
             tabsRef.current = next;
             setTabs(next);
           }
+          // 7. 交付本段结果或清理函数，由调用方承接后续生命周期。
           return;
         } catch (error) {
           if (
@@ -175,13 +172,16 @@ export function TravelApp() {
           throw error;
         }
       }
+      // 2. 重载时版本持续变化则明确失败，避免展示混合代次历史。
       throw new Error("消息正在被修改，请稍后重新加载");
     },
     [],
   );
   const loadTabs = useCallback(async (generation: number, maxSeq?: string) => {
+    // 1. 建立恢复游标，按服务端快照上界推进分页。
     let after = "0";
     const all: Conversation[] = [];
+    // 2. 逐页或逐项推进恢复，核对游标、停止与取消条件。
     do {
       const page = await api<ChatPage>("/chat/list", {
         after,
@@ -193,16 +193,23 @@ export function TravelApp() {
       if (page.nextCursor === after) throw new Error("对话分页未推进");
       after = page.nextCursor;
     } while (true);
+    // 3. 核对登录恢复代次，丢弃旧页面或重复事件。
     if (epoch.current === generation) publishTabs(all);
+    // 4. 交付本段结果或清理函数，由调用方承接后续生命周期。
     return all;
   }, []);
   const restore = useCallback(
     async (generation: number) => {
+      // 1. 更新恢复状态，让界面展示当前加载进度。
       setLoading(true);
+      // 2. 在失败反馈与资源清理边界内完成当前操作。
       try {
+        // 1. 先读取恢复高水位，再完整加载会话及各自历史。
         const manifest = await api<ChatPage>("/chat/bootstrap", {});
         const all = await loadTabs(generation, manifest.maxSeq);
+        // 2. 逐页或逐项推进恢复，核对游标、停止与取消条件。
         for (const tab of all) await loadHistory(tab.id, true, generation);
+        // 3. 核对登录恢复代次，丢弃旧页面或重复事件。
         if (epoch.current === generation) cursor.current = manifest.syncSeq;
       } finally {
         if (epoch.current === generation) setLoading(false);
@@ -211,21 +218,26 @@ export function TravelApp() {
     [loadTabs, loadHistory],
   );
   const loadContext = useCallback(async (id: string) => {
+    // 1. 处理当前前置条件或恢复分支，失效状态不继续执行。
     if (!id) {
-      setBudget(zeroBudget);
+      setBudget(ContextBudget.empty());
       setRun(undefined);
       return;
     }
+    // 2. 拉取当前接口数据窗口，分页游标必须可推进。
     const page = await api<ChatPage>("/chat/context", { conversationId: id });
+    // 3. 处理当前前置条件或恢复分支，失效状态不继续执行。
     if (activeRef.current === id) {
-      setBudget(parseBudget(page.context));
+      setBudget(ContextBudget.fromServer(page.context));
       setRun(page.run);
     }
   }, []);
   const processEvent = useCallback(
     async (event: SyncEvent, generation: number) => {
+      // 1. 核对登录恢复代次，丢弃旧页面或重复事件。
       if (epoch.current !== generation || big(event.seq) <= big(cursor.current))
         return;
+      // 2. 仅结束事件目标SID的旧页面，其他设备继续保持登录。
       if (
         event.targetSid === user?.sid &&
         ["session.replaced", "session.revoked"].includes(event.type)
@@ -235,20 +247,26 @@ export function TravelApp() {
         message.warning("当前页面登录已结束，请重新登录");
         return;
       }
+      // 3. 处理当前前置条件或恢复分支，失效状态不继续执行。
       if (event.type.startsWith("knowledge."))
         setKnowledgeRevision((value) => value + 1);
+      // 4. 处理当前前置条件或恢复分支，失效状态不继续执行。
       if (event.type.startsWith("conversation.")) await loadTabs(generation);
+      // 5. 固定tab对应的本次操作状态，避免异步处理跨越页面生命周期。
       const tab = tabsRef.current.find((item) => item.id === event.id);
+      // 6. 处理当前前置条件或恢复分支，失效状态不继续执行。
       if (
         tab &&
         (event.type.startsWith("message") || event.type === "run.retried")
       )
         await loadHistory(tab.id, event.type.includes("deleted"), generation);
+      // 7. 处理当前前置条件或恢复分支，失效状态不继续执行。
       if (event.type.startsWith("context.") || event.type.startsWith("run.")) {
         const page = await api<ChatPage>("/chat/run", { runId: event.id });
         if (page.run)
           await loadHistory(page.run.conversationId, false, generation);
       }
+      // 8. 处理当前前置条件或恢复分支，失效状态不继续执行。
       if (
         activeRef.current &&
         (event.type.startsWith("context.") ||
@@ -256,29 +274,42 @@ export function TravelApp() {
           event.type.startsWith("message"))
       )
         await loadContext(activeRef.current);
+      // 9. 核对登录恢复代次，丢弃旧页面或重复事件。
       if (epoch.current === generation) cursor.current = event.seq;
     },
     [user?.sid, loadTabs, loadHistory, loadContext, message],
   );
+  // 5. 管理当前组件的事件监听，生命周期结束及时解除。
   useEffect(() => {
+    // 1. 记录组件生命周期，卸载后不回写登录态。
     let alive = true;
+    // 2. 更新当前页面认证视图，凭据恢复与界面生命周期一致。
     recoverSession().then((value) => {
       if (alive) {
         setUser(value);
         setStarting(false);
       }
     });
+    // 3. 固定ended对应的本次操作状态，避免异步处理跨越页面生命周期。
     const ended = () => {
+      // 1. 更新当前页面认证视图，凭据恢复与界面生命周期一致。
       setUser(null);
+      // 2. 提示当前业务前置条件或认证状态，避免无效提交。
       message.warning("登录已失效，请重新登录");
     };
+    // 4. 管理当前组件的事件监听，生命周期结束及时解除。
     window.addEventListener("ht-session-ended", ended);
+    // 5. 交付本段结果或清理函数，由调用方承接后续生命周期。
     return () => {
+      // 1. 标记本页面已退出，异步恢复结果不能写回卸载的界面。
       alive = false;
+      // 2. 管理当前组件的事件监听，生命周期结束及时解除。
       window.removeEventListener("ht-session-ended", ended);
     };
   }, [message]);
+  // 6. 串行消费同步事件，保持同用户事件提交顺序。
   useEffect(() => {
+    // 1. 处理当前前置条件或恢复分支，失效状态不继续执行。
     if (!user) {
       epoch.current++;
       historiesRef.current = {};
@@ -286,29 +317,40 @@ export function TravelApp() {
       publishTabs([]);
       return;
     }
+    // 2. 固定恢复代次，旧异步结果不能更新新登录界面。
     const generation = ++epoch.current;
     const controller = new AbortController();
+    // 3. 串行消费同步事件，保持同用户事件提交顺序。
     queue.current = Promise.resolve();
+    // 4. 固定receive对应的本次操作状态，避免异步处理跨越页面生命周期。
     const receive = (event: SyncEvent) => {
       queue.current = queue.current.then(() => processEvent(event, generation));
     };
+    // 5. 串行消费同步事件，保持同用户事件提交顺序。
     async function connect() {
+      // 1. 在失败反馈与资源清理边界内完成当前操作。
       try {
         await restore(generation);
       } catch (error) {
         message.error((error as Error).message);
       }
+      // 2. 逐页或逐项推进恢复，核对游标、停止与取消条件。
       while (!controller.signal.aborted && epoch.current === generation) {
         try {
+          // 1. 固定more: boolean对应的本次操作状态，避免异步处理跨越页面生命周期。
           let more: boolean;
+          // 2. 逐页或逐项推进恢复，核对游标、停止与取消条件。
           do {
             const page = await api<SyncPage>("/sync?after=" + cursor.current);
             for (const event of page.items) receive(event);
             await queue.current;
             more = page.hasMore;
           } while (more && !controller.signal.aborted);
+          // 3. 更新同步连接状态，断流恢复期间明确展示状态。
           setConnection("已同步");
+          // 4. 从持久事件游标建立消息流，收到事件后再推进恢复位置。
           await stream(cursor.current, controller.signal, receive);
+          // 5. 串行消费同步事件，保持同用户事件提交顺序。
           await queue.current;
         } catch (error) {
           if (controller.signal.aborted) break;
@@ -324,11 +366,15 @@ export function TravelApp() {
         }
         if (!controller.signal.aborted)
           await new Promise<void>((resolve) => {
+            // 1. 固定timer对应的本次操作状态，避免异步处理跨越页面生命周期。
             const timer = window.setTimeout(resolve, 1500);
+            // 2. 管理当前组件的事件监听，生命周期结束及时解除。
             controller.signal.addEventListener(
               "abort",
               () => {
+                // 1. 清理重连计时器，页面退出后不保留恢复任务。
                 clearTimeout(timer);
+                // 2. 结束当前可取消的等待，使连接生命周期继续或退出。
                 resolve();
               },
               { once: true },
@@ -336,28 +382,39 @@ export function TravelApp() {
           });
       }
     }
+    // 6. 启动当前页面代次的连接恢复，旧页面代次不得写回状态。
     connect();
+    // 7. 交付本段结果或清理函数，由调用方承接后续生命周期。
     return () => {
       controller.abort();
     };
   }, [user?.sid, processEvent, restore, message]);
+  // 7. 刷新当前对话的上下文占比与任务进度。
   useEffect(() => {
     loadContext(active).catch((error) => message.error(error.message));
   }, [active, loadContext, message]);
+  // 8. 绑定页面连接与数据恢复的生命周期，卸载时执行清理。
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: "smooth" });
   }, [active, histories[active]?.length]);
+  // 9. 定义新建对话流程，提交后读取服务端确定的对话快照。
   async function create() {
     try {
+      // 1. 拉取当前接口数据窗口，分页游标必须可推进。
       const page = await api<ChatPage>("/chat/create", { title: "新对话" });
+      // 2. 合并并发布最新对话快照，稳定标识相同的记录只保留一份。
       publishTabs([...tabsRef.current, ...page.conversations]);
+      // 3. 切换到新建对话，并清理上个对话的局部选择。
       select(page.conversations[0].id);
     } catch (error) {
       message.error((error as Error).message);
     }
   }
+  // 10. 重读受影响会话的消息快照，推送不作为唯一正文来源。
   async function send() {
+    // 1. 处理当前前置条件或恢复分支，失效状态不继续执行。
     if (!active || !draft.trim() || sending) return;
+    // 2. 固定消息幂等键与正文，网络失败重试复用同一请求。
     const request =
       pending.current?.conversationId === active &&
       pending.current.text === draft
@@ -367,14 +424,23 @@ export function TravelApp() {
             text: draft,
             requestKey: crypto.randomUUID(),
           };
+    // 3. 保留或清除本次幂等请求，避免网络重试创建重复用户消息。
     pending.current = request;
+    // 4. 切换发送中状态，避免重复提交并在结束后恢复。
     setSending(true);
+    // 5. 在失败反馈与资源清理边界内完成当前操作。
     try {
+      // 1. 拉取当前接口数据窗口，分页游标必须可推进。
       const page = await api<ChatPage>("/chat/submit", request);
+      // 2. 更新输入草稿，已提交文本不重复留在输入框。
       setDraft("");
+      // 3. 保留或清除本次幂等请求，避免网络重试创建重复用户消息。
       pending.current = null;
+      // 4. 保存本轮生成任务状态，重试与取消绑定同一任务。
       setRun(page.run);
+      // 5. 重读受影响会话的消息快照，推送不作为唯一正文来源。
       await loadHistory(active, false, epoch.current);
+      // 6. 刷新当前对话的上下文占比与任务进度。
       await loadContext(active);
     } catch (error) {
       message.error((error as Error).message);
@@ -382,22 +448,31 @@ export function TravelApp() {
       setSending(false);
     }
   }
+  // 11. 重读受影响会话的消息快照，推送不作为唯一正文来源。
   async function removeMessages() {
+    // 1. 固定conversation对应的本次操作状态，避免异步处理跨越页面生命周期。
     const conversation = tabsRef.current.find((tab) => tab.id === active);
+    // 2. 处理当前前置条件或恢复分支，失效状态不继续执行。
     if (!conversation) return;
+    // 3. 在失败反馈与资源清理边界内完成当前操作。
     try {
+      // 1. 发布当前状态或连接结果，后续页面操作使用最新快照。
       await api("/chat/delete-messages", {
         conversationId: active,
         messageIds: selected,
         expectedVersion: conversation.version,
       });
+      // 2. 更新当前选择项，操作对象与页面选择保持一致。
       setSelected([]);
+      // 3. 重读受影响会话的消息快照，推送不作为唯一正文来源。
       await loadHistory(active, true, epoch.current);
+      // 4. 刷新当前对话的上下文占比与任务进度。
       await loadContext(active);
     } catch (error) {
       message.error((error as Error).message);
     }
   }
+  // 12. 固定messages对应的本次操作状态，避免异步处理跨越页面生命周期。
   const messages = histories[active] || [];
   const virtual = useVirtualizer({
     count: messages.length,
@@ -406,6 +481,7 @@ export function TravelApp() {
     overscan: 6,
     getItemKey: (index) => messages[index].id,
   });
+  // 13. 处理当前前置条件或恢复分支，失效状态不继续执行。
   if (starting)
     return (
       <div className="boot">
@@ -413,22 +489,18 @@ export function TravelApp() {
         <p>正在恢复页面登录</p>
       </div>
     );
+  // 14. 处理当前前置条件或恢复分支，失效状态不继续执行。
   if (!user)
     return (
       <Suspense fallback={<Spin />}>
         <AuthPanel onLogin={setUser} />
       </Suspense>
     );
+  // 15. 固定conversation对应的本次操作状态，避免异步处理跨越页面生命周期。
   const conversation = tabs.find((tab) => tab.id === active);
   const occupied = ["ACCEPTED", "RUNNING"].includes(run?.status || "");
-  const percent = Math.min(
-    100,
-    Math.round(
-      ((budget.inputEstimate + budget.outputReserve + budget.safetyReserve) /
-        budget.window) *
-        100,
-    ),
-  );
+  const percent = budget.percentage();
+  // 16. 渲染当前对话与同步状态，消息版本决策由历史对象负责。
   return (
     <div className="workspace">
       <aside className="sidebar">
@@ -489,10 +561,12 @@ export function TravelApp() {
                         okText: "删除",
                         okButtonProps: { danger: true },
                         onOk: async () => {
+                          // 1. 发布当前状态或连接结果，后续页面操作使用最新快照。
                           await api("/chat/delete", {
                             conversationId: tab.id,
                             expectedVersion: tab.version,
                           });
+                          // 2. 重新读取完整对话列表，反映服务端实际变更。
                           await loadTabs(epoch.current);
                         },
                       });
@@ -595,7 +669,9 @@ export function TravelApp() {
                     }}
                   >
                     {virtual.getVirtualItems().map((row) => {
+                      // 1. 固定item对应的本次操作状态，避免异步处理跨越页面生命周期。
                       const item = messages[row.index];
+                      // 2. 渲染当前对话与同步状态，消息版本决策由历史对象负责。
                       return (
                         <div
                           key={item.id}
@@ -693,9 +769,11 @@ export function TravelApp() {
                           size="small"
                           onClick={async () => {
                             try {
+                              // 1. 拉取当前接口数据窗口，分页游标必须可推进。
                               const page = await api<ChatPage>("/chat/retry", {
                                 runId: run.id,
                               });
+                              // 2. 保存本轮生成任务状态，重试与取消绑定同一任务。
                               setRun(page.run);
                             } catch (error) {
                               message.error((error as Error).message);
@@ -733,9 +811,11 @@ export function TravelApp() {
                       <Button
                         onClick={async () => {
                           try {
+                            // 1. 拉取当前接口数据窗口，分页游标必须可推进。
                             const page = await api<ChatPage>("/chat/cancel", {
                               runId: run!.id,
                             });
+                            // 2. 保存本轮生成任务状态，重试与取消绑定同一任务。
                             setRun(page.run);
                           } catch (error) {
                             message.error((error as Error).message);
@@ -767,34 +847,29 @@ export function TravelApp() {
               <h3>记忆与使用情况</h3>
               <Progress
                 type="circle"
-                percent={percent}
+                percent={percent ?? 0}
+                format={() => (percent === null ? "—" : `${percent}%`)}
                 size={116}
                 strokeColor="#236451"
               />
               <p>保守预算占比 · 含输出与安全预留</p>
               <div className="budget-line">
                 <span>输入估算</span>
-                <strong>{budget.inputEstimate.toLocaleString()}</strong>
+                <strong>{budget.display("inputEstimate")}</strong>
               </div>
               <div className="budget-line">
                 <span>输出预留</span>
-                <strong>{budget.outputReserve.toLocaleString()}</strong>
+                <strong>{budget.display("outputReserve")}</strong>
               </div>
               <div className="budget-line">
                 <span>安全预留</span>
-                <strong>{budget.safetyReserve.toLocaleString()}</strong>
+                <strong>{budget.display("safetyReserve")}</strong>
               </div>
               <div className="budget-line">
                 <span>应用上下文上限</span>
-                <strong>{budget.window.toLocaleString()}</strong>
+                <strong>{budget.display("window")}</strong>
               </div>
-              <Tag>
-                {budget.compression === "RUNNING"
-                  ? "正在压缩记忆"
-                  : budget.compression === "COMPLETED"
-                    ? "摘要压缩完成"
-                    : "正常使用"}
-              </Tag>
+              <Tag>{budget.compressionLabel()}</Tag>
               {budget.actualInputTokens !== undefined && (
                 <div className="budget-line">
                   <span>本次回答实际输入</span>
@@ -827,14 +902,19 @@ export function TravelApp() {
         okText="保存"
         onCancel={() => setEditing(null)}
         onOk={async () => {
+          // 1. 处理当前前置条件或恢复分支，失效状态不继续执行。
           if (!editing || !title.trim()) return;
+          // 2. 在失败反馈与资源清理边界内完成当前操作。
           try {
+            // 1. 发布当前状态或连接结果，后续页面操作使用最新快照。
             await api("/chat/rename", {
               conversationId: editing.id,
               title: title.trim(),
               expectedVersion: editing.version,
             });
+            // 2. 关闭已完成的编辑状态，后续刷新持久化标题。
             setEditing(null);
+            // 3. 重新读取完整对话列表，反映服务端实际变更。
             await loadTabs(epoch.current);
           } catch (error) {
             message.error((error as Error).message);

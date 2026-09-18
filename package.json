@@ -8,8 +8,9 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "check": "tsc --noEmit -p tsconfig.app.json",
-    "format": "prettier --write src vite.config.ts index.html *.json",
-    "format:check": "prettier --check src vite.config.ts index.html *.json"
+    "format": "prettier --write src tests vite.config.ts index.html *.json",
+    "format:check": "prettier --check src tests vite.config.ts index.html *.json",
+    "test": "node --test tests/*.test.ts"
   },
   "dependencies": {
     "@ant-design/icons": "6.3.4",
