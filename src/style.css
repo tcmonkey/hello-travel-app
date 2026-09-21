@@ -192,6 +192,8 @@ button {
   border-radius: 15px;
 }
 .message.assistant {
+  width: 100%;
+  max-width: none;
   margin-right: auto;
   padding: 18px 23px;
   border: 1px solid #e7ece4;
