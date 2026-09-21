@@ -25,6 +25,8 @@ import {
   PlusOutlined,
   SendOutlined,
   MoreOutlined,
+  CopyOutlined,
+  DeleteOutlined,
   BookOutlined,
   MessageOutlined,
   LogoutOutlined,
@@ -472,7 +474,68 @@ export function TravelApp() {
       message.error((error as Error).message);
     }
   }
-  // 12. 固定messages对应的本次操作状态，避免异步处理跨越页面生命周期。
+  // 12. 复制单条消息正文，失败时只反馈本地剪贴板能力问题。
+  async function copyMessage(content: string) {
+    // 1. 空的流式占位不提供无意义复制，避免把等待状态当作回答正文。
+    if (!content) return;
+    // 2. 在受浏览器权限保护的剪贴板边界内完成复制并反馈结果。
+    try {
+      await navigator.clipboard.writeText(content);
+      message.success("已复制");
+    } catch {
+      message.error("复制失败，请检查浏览器剪贴板权限");
+    }
+  }
+  // 13. 删除入口默认选择同轮问答，选择态仍允许用户保留单条删除。
+  function selectMessagePair(messageIndex: number) {
+    // 1. 取得当前消息及相邻的问答消息；同一提交在历史中按用户、助手顺序持久化。
+    const current = messages[messageIndex];
+    const related =
+      current?.role === "USER"
+        ? messages[messageIndex + 1]
+        : messages[messageIndex - 1];
+    // 2. 仅将相邻的反向角色纳入默认选择，避免跨轮次误选。
+    const ids = [current, related]
+      .filter(
+        (item): item is Message =>
+          Boolean(item) && item.role !== current?.role,
+      )
+      .map((item) => item.id);
+    // 3. 发布默认选择；随后由各消息复选框支持逐条取消或增加。
+    setSelected([...new Set(ids)]);
+  }
+  // 14. 渲染消息操作，用户消息按悬停显示，助手回答始终展示在正文下方。
+  function renderMessageActions(item: Message, messageIndex: number) {
+    return (
+      <div
+        className={
+          "message-actions " + (item.role === "USER" ? "on-hover" : "")
+        }
+      >
+        <Tooltip title="复制">
+          <Button
+            type="text"
+            size="small"
+            icon={<CopyOutlined />}
+            aria-label="复制消息"
+            disabled={!item.content}
+            onClick={() => copyMessage(item.content)}
+          />
+        </Tooltip>
+        <Tooltip title="删除">
+          <Button
+            type="text"
+            size="small"
+            danger
+            icon={<DeleteOutlined />}
+            aria-label="选择删除消息"
+            onClick={() => selectMessagePair(messageIndex)}
+          />
+        </Tooltip>
+      </div>
+    );
+  }
+  // 15. 固定messages对应的本次操作状态，避免异步处理跨越页面生命周期。
   const messages = histories[active] || [];
   const virtual = useVirtualizer({
     count: messages.length,
@@ -612,7 +675,6 @@ export function TravelApp() {
                 : "知识库管理"}
             </strong>
           </div>
-          <Tag color="green">一期 · 咨询与规划</Tag>
         </header>
         {menu === "knowledge" ? (
           <Suspense fallback={<Spin />}>
@@ -638,7 +700,7 @@ export function TravelApp() {
                       icon={<PlusOutlined />}
                       onClick={create}
                     >
-                      开启旅行规划
+                      开始对话
                     </Button>
                     <div className="sample-cards">
                       <div>
@@ -671,6 +733,13 @@ export function TravelApp() {
                     {virtual.getVirtualItems().map((row) => {
                       // 1. 固定item对应的本次操作状态，避免异步处理跨越页面生命周期。
                       const item = messages[row.index];
+                      // 2. 选择态显示复选框，正常阅读时不暴露批量管理控件。
+                      const selecting = selected.length > 0;
+                      const hasStatus =
+                        item.status === "ACCEPTED"
+                        || item.status === "STREAMING"
+                        || item.status === "FAILED"
+                        || item.status === "INTERRUPTED";
                       // 2. 渲染当前对话与同步状态，消息版本决策由历史对象负责。
                       return (
                         <div
@@ -690,21 +759,23 @@ export function TravelApp() {
                             key={item.id}
                             className={"message " + item.role.toLowerCase()}
                           >
-                            <div className="message-meta">
-                              <strong>
-                                {item.role === "USER" ? "你" : "Hello Travel"}
-                              </strong>
-                              <span>
-                                {item.status === "STREAMING"
-                                  ? "正在规划…"
-                                  : item.status === "FAILED"
-                                    ? "生成失败"
-                                    : item.status === "INTERRUPTED"
-                                      ? "生成已中断"
-                                      : ""}
-                              </span>
+                            {hasStatus && (
+                              <div className="message-meta">
+                                <span>
+                                  {item.status === "ACCEPTED"
+                                          || item.status === "STREAMING"
+                                    ? "正在回答"
+                                    : item.status === "FAILED"
+                                      ? "生成失败"
+                                      : "生成已中断"}
+                                </span>
+                              </div>
+                            )}
+                            {selecting && (
                               <Checkbox
+                                className="message-select"
                                 checked={selected.includes(item.id)}
+                                aria-label="选择消息"
                                 onChange={(event) =>
                                   setSelected((values) =>
                                     event.target.checked
@@ -713,12 +784,20 @@ export function TravelApp() {
                                   )
                                 }
                               />
-                            </div>
+                            )}
                             <div className="message-content">
                               {item.content ||
                                 (item.status === "ACCEPTED"
-                                  ? "规划任务已接收…"
-                                  : "暂时没有回答内容")}
+                                        || item.status === "STREAMING"
+                                  ? <span className="thinking-indicator" role="status" aria-live="polite">
+                                      正在准备回答
+                                      <span className="thinking-dots" aria-hidden="true">
+                                        <i>·</i><i>·</i><i>·</i>
+                                      </span>
+                                    </span>
+                                  : item.status === "FAILED"
+                                    ? "本轮回答生成失败，请使用下方按钮重试。"
+                                    : "暂无回答内容")}
                             </div>
                             {item.citations && item.citations !== "[]" && (
                               <details>
@@ -726,6 +805,7 @@ export function TravelApp() {
                                 <pre>{item.citations}</pre>
                               </details>
                             )}
+                            {renderMessageActions(item, row.index)}
                           </article>
                         </div>
                       );
@@ -736,7 +816,7 @@ export function TravelApp() {
               </div>
               {selected.length > 0 && (
                 <div className="selection-toolbar">
-                  <span>已选择 {selected.length} 条消息</span>
+                  <span>已选择 {selected.length} 条消息，可单独取消勾选</span>
                   <Button
                     danger
                     size="small"
@@ -789,7 +869,7 @@ export function TravelApp() {
                   <Input.TextArea
                     value={draft}
                     onChange={(event) => setDraft(event.target.value)}
-                    placeholder="例如：从杭州出发，周末去景德镇，两个人，预算2000元…"
+                    placeholder="例如：杭州今天的天气如何？或帮我安排周末景德镇两日游…"
                     autoSize={{ minRows: 2, maxRows: 7 }}
                     maxLength={8000}
                     disabled={!active}

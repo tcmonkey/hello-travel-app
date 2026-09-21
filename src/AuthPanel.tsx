@@ -11,16 +11,28 @@ export function AuthPanel({
   const [mode, setMode] = useState("登录");
   const [otpLogin, setOtpLogin] = useState(false);
   const [challenge, setChallenge] = useState("");
+  const [delivery, setDelivery] = useState("");
   const [busy, setBusy] = useState(false);
   const [form] = Form.useForm();
   const { message } = App.useApp();
   const purpose =
-    mode === "注册"
-      ? "REGISTER"
-      : mode === "重置密码"
-        ? "RESET_PASSWORD"
-        : "LOGIN";
+    mode === "设置/重置密码" ? "RESET_PASSWORD" : "LOGIN";
   const needsCode = mode !== "登录" || otpLogin;
+  async function waitForDelivery(challengeId: string) {
+    // 1. 在有限时间内查询持久化投递状态，浏览器不以入队成功冒充邮件已发送。
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const result = await api<{ challengeId: string; status: string }>(
+        `/auth/challenge/${encodeURIComponent(challengeId)}/status`,
+      );
+      // 2. 已投递时返回最终状态，允许用户继续提交邮箱证明。
+      if (["ISSUED", "FAILED", "EXPIRED", "REVOKED"].includes(result.status))
+        return result.status;
+      // 3. 等待后台调度领取发件箱任务，避免对状态接口发起无间隔轮询。
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+    }
+    // 4. 超过可见等待窗口仍未结束时返回待投递状态，禁止提交尚未生效的证明。
+    return "PENDING_SEND";
+  }
   // 2. 校验邮箱字段后才申请证明，避免无效投递请求。
   async function issue() {
     try {
@@ -35,23 +47,31 @@ export function AuthPanel({
       });
       // 4. 更新当前用途的邮箱证明标识，旧用途证明不能复用。
       setChallenge(result.challengeId);
-      // 5. 显示服务端已接受操作的反馈，后台任务结果由后续查询确认。
-      message.success("验证码已进入邮件投递流程，请查看邮箱");
+      setDelivery("PENDING_SEND");
+      // 5. 等待后台投递的持久状态，避免把入队成功错误展示成邮件已发送。
+      const status = await waitForDelivery(result.challengeId);
+      setDelivery(status);
+      if (status === "ISSUED") {
+        message.success("验证码已发送，请查看邮箱");
+      } else {
+        setChallenge("");
+        message.error("验证码邮件未成功投递，请检查邮件配置后重新获取");
+      }
     } catch (error) {
       message.error(error instanceof Error ? error.message : "发送失败");
     } finally {
       setBusy(false);
     }
   }
-  // 3. 定义认证提交流程，区分登录、注册与密码重置后的页面状态。
+  // 3. 定义认证提交流程，区分统一登录与密码设置/重置后的页面状态。
   async function submit(value: {
     email: string;
     password?: string;
     code?: string;
   }) {
     // 1. 处理当前前置条件或恢复分支，失效状态不继续执行。
-    if (needsCode && !challenge) {
-      message.warning("请先获取邮箱验证码");
+    if (needsCode && (!challenge || delivery !== "ISSUED")) {
+      message.warning("请等待验证码邮件投递成功后再提交");
       return;
     }
     // 2. 更新提交状态，避免按钮重复触发当前操作。
@@ -60,7 +80,7 @@ export function AuthPanel({
     try {
       // 1. 固定path对应的本次操作状态，避免异步处理跨越页面生命周期。
       const path =
-        mode === "注册" ? "register" : mode === "重置密码" ? "reset" : "login";
+        mode === "设置/重置密码" ? "reset" : "login";
       const result = await api<Session>("/auth/" + path, {
         ...value,
         password: mode === "登录" && otpLogin ? undefined : value.password,
@@ -72,9 +92,7 @@ export function AuthPanel({
         adoptSession(result);
         onLogin(result);
       } else {
-        message.success(
-          mode === "注册" ? "注册成功，请登录" : "密码已重置，请重新登录",
-        );
+        message.success("密码已设置，请使用密码或验证码登录");
         setMode("登录");
         setChallenge("");
         form.resetFields(["password", "code"]);
@@ -105,13 +123,14 @@ export function AuthPanel({
         <Typography.Title level={3}>开启你的旅行对话</Typography.Title>
         <Segmented
           block
-          options={["登录", "注册", "重置密码"]}
+          options={["登录", "设置/重置密码"]}
           value={mode}
           onChange={(value) => {
             // 1. 切换认证操作模式，后续请求使用对应接口。
             setMode(String(value));
             // 2. 更新当前用途的邮箱证明标识，旧用途证明不能复用。
             setChallenge("");
+            setDelivery("");
           }}
         />
         <Form
@@ -138,13 +157,14 @@ export function AuthPanel({
                 setOtpLogin(value === "验证码登录");
                 // 2. 更新当前用途的邮箱证明标识，旧用途证明不能复用。
                 setChallenge("");
+                setDelivery("");
               }}
             />
           )}
           {(!otpLogin || mode !== "登录") && (
             <Form.Item
               name="password"
-              label={mode === "重置密码" ? "新密码" : "密码"}
+              label={mode === "设置/重置密码" ? "新密码" : "密码"}
               rules={[
                 {
                   required: true,
