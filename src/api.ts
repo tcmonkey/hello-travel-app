@@ -195,7 +195,6 @@ export async function stream(
     }
   } finally {
     await reader.cancel().catch(() => undefined);
-    reader.releaseLock();
   }
-  
+
 }

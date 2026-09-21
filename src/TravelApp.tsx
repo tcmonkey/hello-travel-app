@@ -498,7 +498,7 @@ export function TravelApp() {
     const ids = [current, related]
       .filter(
         (item): item is Message =>
-          Boolean(item) && item.role !== current?.role,
+          Boolean(item) && (item === current || item.role !== current.role),
       )
       .map((item) => item.id);
     // 3. 发布默认选择；随后由各消息复选框支持逐条取消或增加。
